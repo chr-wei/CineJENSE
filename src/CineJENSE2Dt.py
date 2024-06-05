@@ -4,6 +4,7 @@ import src.losses as losses
 import src.utils as utils
 import torch
 import torch.cuda.amp as amp
+from src.slow_encoding import MultiResHashGrid
 
 @torch.jit.script
 def FFT(x):
@@ -44,37 +45,70 @@ encoding_config_csm = {
     'n_levels': 4,
     'n_features_per_level': 8,
     'log2_hashmap_size': 19,
-    'base_resolution': 2, 
+    'base_resolution': 2,
     'per_level_scale': 1.1,
     'interpolation': 'Linear' }
 
 
-def CINEJENSE_hash_Recon(tstDsKsp, SamMask, DEVICE, dc_weight, reg_weight, MaxIter, learning_rate): 
-    
+def CINEJENSE_hash_Recon(tstDsKsp, SamMask, DEVICE, dc_weight, reg_weight, MaxIter, learning_rate):
 
     (nRow, nCol, nFrame, nCoil) = tstDsKsp.shape
 
     coor = utils.build_coordinate_2Dt_train(nRow, nCol, nFrame, DEVICE).float()
-    
+
     tstDsKsp_tensor = torch.tensor(tstDsKsp, dtype=torch.complex64, device=DEVICE)
-    SamMask_t = torch.tensor(SamMask, dtype=torch.int, device=DEVICE)[:,:,None,:].repeat(1,1,nFrame,1) 
-   
+    SamMask_t = torch.tensor(SamMask, dtype=torch.int, device=DEVICE)[:,:,None,:].repeat(1,1,nFrame,1)
+
     reg_loss_function = losses.TVLoss()
     dc_loss_function = torch.nn.HuberLoss(delta=1.0)
-    
-    IMAGE = torch.compile(tcnn.NetworkWithInputEncoding(3, 2, encoding_config, network_config))
-    CSM = torch.compile(tcnn.NetworkWithInputEncoding(3, 2*nCoil, encoding_config_csm, network_config))
+
+    if torch.cuda.is_available():
+        IMAGE = tcnn.NetworkWithInputEncoding(3, 2, encoding_config, network_config)
+        CSM = tcnn.NetworkWithInputEncoding(3, 2*nCoil, encoding_config_csm, network_config)
+    else:
+        # A slower hash-grid encoding but can run on cpu and mps (torch native fns)
+        IMAGE_ENC = MultiResHashGrid(3,
+            n_levels=encoding_config['n_levels'],
+            n_features_per_level=encoding_config['n_features_per_level'],
+            log2_hashmap_size=encoding_config['log2_hashmap_size'],
+            base_resolution=encoding_config['base_resolution'],
+            finest_resolution=round(encoding_config['base_resolution'] * 1.5**(encoding_config['n_levels']-1)),
+        )
+        IMAGE = torch.nn.Sequential(
+            IMAGE_ENC,
+            torch.nn.Linear(IMAGE_ENC.output_dim, 64),
+            torch.nn.ReLU(),
+            torch.nn.Linear(64, 64),
+            torch.nn.ReLU(),
+            torch.nn.Linear(64, 2),
+        ).to(DEVICE)
+
+        CSM_ENC = MultiResHashGrid(3,
+            n_levels=encoding_config_csm['n_levels'],
+            n_features_per_level=encoding_config_csm['n_features_per_level'],
+            log2_hashmap_size=encoding_config_csm['log2_hashmap_size'],
+            base_resolution=encoding_config_csm['base_resolution'],
+            finest_resolution=round(encoding_config_csm['base_resolution'], * encoding_config_csm['per_level_scale']**(encoding_config_csm['n_levels']-1)),
+        )
+        CSM = torch.nn.Sequential(
+            CSM_ENC,
+            torch.nn.Linear(CSM_ENC.output_dim, 64),
+            torch.nn.ReLU(),
+            torch.nn.Linear(64, 64),
+            torch.nn.ReLU(),
+            torch.nn.Linear(64, 2*nCoil),
+        ).to(DEVICE)
 
     optimizer = torch.optim.Adam(
         params=[
-            {"name": "img_net", "params":  list(IMAGE.parameters())}, 
-            {"name": "sens_net", "params": list(CSM.parameters())}, 
+            {"name": "img_net", "params":  list(IMAGE.parameters())},
+            {"name": "sens_net", "params": list(CSM.parameters())},
         ],
         lr=learning_rate,
         betas=(0.9, 0.99),
         eps=1e-15,
     )
-    
+
     scaler = amp.GradScaler()
     for ite_i in range(MaxIter):
 
@@ -89,7 +123,7 @@ def CINEJENSE_hash_Recon(tstDsKsp, SamMask, DEVICE, dc_weight, reg_weight, MaxIt
             csm = torch.complex(csm[...,0:1], csm[...,1:]).squeeze(-1)
 
             csm_norm = torch.sqrt(torch.sum(csm.conj() * csm, -1)).unsqueeze(-1)
-    
+
             csm = csm / (csm_norm + 1e-12)
 
             fft_pre_intensity = FFT(pre_intensity * csm)
@@ -97,19 +131,17 @@ def CINEJENSE_hash_Recon(tstDsKsp, SamMask, DEVICE, dc_weight, reg_weight, MaxIt
             reg_loss = reg_loss_function(pre_intensity)
 
             dc_loss = dc_loss_function(torch.view_as_real(fft_pre_intensity[SamMask_t == 1]).float(), torch.view_as_real(tstDsKsp_tensor[SamMask_t == 1]).float())
-            
-            loss = dc_weight * dc_loss + reg_weight * reg_loss 
 
-            
+            loss = dc_weight * dc_loss + reg_weight * reg_loss
+
             optimizer.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
-                
+
             if (ite_i+1) == MaxIter:
                 with torch.no_grad():
                     recon_im = IFFT(fft_pre_intensity * (1 - SamMask_t.float()) + tstDsKsp_tensor)
                     recon_img_reduce = coil_reduce(recon_im,  csm).cpu().detach().numpy()
 
     return recon_img_reduce
-

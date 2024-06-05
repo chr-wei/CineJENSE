@@ -1,4 +1,3 @@
-import sys
 import re
 from pathlib import Path
 import argparse
@@ -86,8 +85,7 @@ def run_cinejense(full_mat_path, accelerated_mat_path, mask_mat_path, accelerati
         print(f"Could not save {save_path}.")
         return
 
-
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--input', type=str, default='./input', help='input directory')
     parser.add_argument('--output', type=str, default='./output', help='output directory')
@@ -123,9 +121,9 @@ if __name__ == "__main__":
             f_mats = all_mats
             f_mats = list(filter(lambda p: coil in str(p), f_mats))
             f_mats = list(filter(lambda p: vw in str(p), f_mats))
-            mask_mats = sorted(list(filter(lambda p: str(p).endswith('mask.mat'), f_mats)))
-            full_mats = sorted(list(filter(lambda p: "FullSample" in str(p), f_mats)))
-            accelerated_mats = list(set(f_mats) - set(mask_mats) - set(full_mats))
+            mask_mats = list(filter(lambda p: str(p).endswith('mask.mat'), f_mats))
+            full_mats = list(filter(lambda p: "FullSample" in str(p), f_mats))
+            accelerated_mats = sorted(list(set(f_mats) - set(mask_mats) - set(full_mats)))
 
             # Create a dictionary based on patient id and acceleration factor. P002, AcFactor04 gets a combined id of 2004, P10, AcFctor10 gets 10010
             mask_mat_dict = {int(m[2])*ID_F + int(m[1]): Path(m[0]) for m in [re.match(r'.*AccFactor([0-9]{2})/P([0-9]{3}).*', str(p)) for p in mask_mats] if m is not None}
@@ -152,4 +150,7 @@ if __name__ == "__main__":
                     Path(base_output_path).resolve() / case_dir
                 )
                 if args.debug:
-                    sys.exit(0)
+                    return
+
+if __name__ == "__main__":
+    main()
