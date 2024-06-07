@@ -20,9 +20,7 @@ import src.CineJENSE2Dt as CineJENSE2Dt
 ID_F = 1000
 
 
-def run_cinejense(full_mat_path, accelerated_mat_path, mask_mat_path, acceleration, output_dir):
-    filename = full_mat_path.name
-    save_path = output_dir / filename
+def run_cinejense(accelerated_mat_path, mask_mat_path, acceleration):
     acc_factor = f"{acceleration:02d}"
 
     try:
@@ -71,19 +69,8 @@ def run_cinejense(full_mat_path, accelerated_mat_path, mask_mat_path, accelerati
 
         recon_image[..., _slice, :] = pre_img_dc * NormFactor
 
-    result = {"run4ranking": np.abs(recon_image)}
+    return recon_image
 
-    try:
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        sio.savemat(
-            save_path,
-            result,
-        )
-        print(f"Successfully saved {save_path}.")
-
-    except:
-        print(f"Could not save {save_path}.")
-        return
 
 def main():
     parser = argparse.ArgumentParser()
@@ -145,12 +132,45 @@ def main():
                 print(f"Processing P{pid:03d}, AccFactor{acceleration:02d}")
                 case_dir = f"{Path(input_path).parts[-1]}/{coil}/{task}/{args.dataset}/AccFactor{acceleration:02d}/P{pid:03d}"
 
-                run_cinejense(
-                    full_mat_path, accelerated_mat_path, mask_mat_path, acceleration,
-                    Path(base_output_path).resolve() / case_dir
-                )
+                recon_image = run_cinejense(accelerated_mat_path, mask_mat_path, acceleration)
+
+                save_path = Path(base_output_path).resolve() / case_dir / full_mat_path.name
+
+                try:
+                    save_path.parent.mkdir(parents=True, exist_ok=True)
+                    sio.savemat(
+                        save_path,
+                        {"run4ranking": np.abs(recon_image)},
+                    )
+                    print(f"Successfully saved {save_path}.")
+
+                except:
+                    print(f"Could not save {save_path}.")
+
+                from src.evaluation import calmetric
+                import hdf5storage
+
+                def gt_reconstruction(gt_kspace):
+                    gt_img = np.fft.ifftshift(
+                        np.fft.ifft2(np.fft.ifftshift(gt_kspace, axes=(0, 1)), axes=(0, 1)),
+                        axes=(0, 1),
+                    )
+                    gt_img = np.sqrt(np.sum(np.abs(gt_img) ** 2, axis=2))
+                    return np.abs(gt_img)
+
+                gt_img = hdf5storage.loadmat(str(full_mat_path))
+                gt_img = gt_img[list(gt_img.keys())[-1]]
+                gt_img = gt_reconstruction(gt_img)
+
+                # Calculate the metrics
+                psnr_values, ssim_values, nmse_values = calmetric(np.abs(recon_image), np.abs(gt_img))
+                print(f"PSNR={psnr_values.mean():.2f}")
+                print(f"SSIM={ssim_values.mean():.2f}")
+                print(f"NMSE={nmse_values.mean():.2f}")
+
                 if args.debug:
                     return
+
 
 if __name__ == "__main__":
     main()
